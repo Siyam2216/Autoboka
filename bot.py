@@ -8,20 +8,14 @@ import time
 import re
 import asyncio
 import hashlib
-import os  # নতুন যুক্ত করা হয়েছে
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # ================= কনফিগারেশন =================
-# Railway এর Environment Variable থেকে টোকেন নিবে
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEB_APP_URL = os.getenv("WEB_APP_URL")
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
-
-# টেস্ট করার জন্য (লোকাল পিসিতে চালাতে চাইলে নিচের লাইনে টোকেন বসাতে পারেন, তবে GitHub-এ আপলোড করবেন না)
-# BOT_TOKEN = "আপনার_নতুন_টোকেন" 
-# WEB_APP_URL = "আপনার_URL"
-# RAPIDAPI_KEY = "আপনার_API_KEY"
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 user_states = {}
@@ -31,11 +25,12 @@ def api_call(action, data):
     try:
         payload = {"action": action}
         payload.update(data)
-        response = requests.post(WEB_APP_URL, json=payload, timeout=10)
+        # গুগল অ্যাপস স্ক্রিপ্টে রিকোয়েস্ট পাঠানো
+        response = requests.post(WEB_APP_URL, json=payload, timeout=15)
         return response.json()
     except Exception as e:
         logging.error(f"API Error: {e}")
-        return {"status": "error"}
+        return {"status": "error", "message": str(e)}
 
 def get_random_username():
     try:
@@ -132,7 +127,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "💰 Balance":
         res = api_call("getUser", {"telegram_id": user_id})
-        bal = res["data"]["balance"] if res["status"] == "success" else 0
+        bal = res["data"]["balance"] if res.get("status") == "success" else 0
         await update.message.reply_text(f"💰 আপনার বর্তমান ব্যালেন্স: **{bal:.3f} tk**", parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
 
     elif text == "📋 Tasks":
@@ -153,7 +148,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🏆 Top":
         res = api_call("getTop", {})
         msg = "🏆 **ডেইলি টপ ৫ ইউজার**\n\n"
-        if res["status"] == "success":
+        if res.get("status") == "success":
             for i, u in enumerate(res["data"]):
                 msg += f"{i+1}. {u['name']} - {u['total']:.2f} tk\n"
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
@@ -163,7 +158,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == "👤 Profile":
         res = api_call("getUser", {"telegram_id": user_id})
-        if res["status"] == "success":
+        if res.get("status") == "success":
             u = res["data"]
             msg = f"👤 **প্রোফাইল**\n\nName: {update.effective_user.first_name}\nUID: `{u['id']}`\nTotal Earning: **{u['total']:.3f} tk**"
         else: msg = "প্রোফাইল লোড করা যায়নি।"
@@ -187,7 +182,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
                 
             user_res = api_call("getUser", {"telegram_id": user_id})
-            current_bal = user_res["data"]["balance"] if user_res["status"] == "success" else 0
+            current_bal = user_res["data"]["balance"] if user_res.get("status") == "success" else 0
             
             if current_bal < amount:
                 await update.message.reply_text(f"❌ আপনার অ্যাকাউন্টে পর্যাপ্ত টাকা নেই।\n\nআপনার বর্তমান ব্যালেন্স: {current_bal:.3f} tk", reply_markup=get_main_reply_keyboard())
@@ -298,11 +293,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "complete_task":
         state = user_states.get(user_id)
         if not state: return
-        payload = {"telegram_id": user_id, "email": state["email"], "password": state["password"], "firstName": state["firstName"], "login": state["login"], "twoFA": state["twoFA"]}
-        api_call("addTask", payload)
-        del user_states[user_id]
-        await query.edit_message_text("✅ **Your data has received. Soon you will get feedback.**")
-        await query.message.reply_text("মেইন মেনু:", reply_markup=get_main_reply_keyboard())
+        
+        payload = {
+            "telegram_id": user_id,
+            "email": state["email"],
+            "password": state["password"],
+            "firstName": state["firstName"],
+            "login": state["login"],
+            "twoFA": state["twoFA"]
+        }
+        
+        res = api_call("addTask", payload)
+        print(f"DEBUG RESPONSE: {res}") # এই লাইনটি টার্মিনালে দেখাবে
+        
+        if res.get("status") == "success":
+            del user_states[user_id]
+            await query.edit_message_text("✅ **Your data has received. Soon you will get feedback.**")
+            await query.message.reply_text("মেইন মেনু:", reply_markup=get_main_reply_keyboard())
+        else:
+            await query.edit_message_text("❌ ডেটা সেভ করা যায়নি। অনুগ্রহ করে আবার চেষ্টা করুন বা অ্যাডমিনকে জানান।")
 
 # ================= অটো চেকার থ্রেড =================
 def auto_checker(app):
@@ -328,7 +337,6 @@ def auto_checker(app):
         time.sleep(60)
 
 def main():
-    # টোকেন না থাকলে এরর দেখাবে
     if not BOT_TOKEN:
         print("ERROR: BOT_TOKEN is not set in environment variables!")
         return
