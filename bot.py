@@ -8,13 +8,20 @@ import time
 import re
 import asyncio
 import hashlib
+import os  # নতুন যুক্ত করা হয়েছে
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # ================= কনফিগারেশন =================
-BOT_TOKEN = "8828357216:AAHBZqHYzBqKfGvysao9hnM9rwUbhwLexXY"
-WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyueJjUI1q1PJRDtWBcp-qnwU-STLNJuUeuumPaNBuKagis0oHSeWe5YKgKkP6R3k1_3A/exec"
-RAPIDAPI_KEY = "d8ee0c71bfmsh220d52fd092f492p11a56ajsn573b4f4d663c" 
+# Railway এর Environment Variable থেকে টোকেন নিবে
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEB_APP_URL = os.getenv("WEB_APP_URL")
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
+
+# টেস্ট করার জন্য (লোকাল পিসিতে চালাতে চাইলে নিচের লাইনে টোকেন বসাতে পারেন, তবে GitHub-এ আপলোড করবেন না)
+# BOT_TOKEN = "আপনার_নতুন_টোকেন" 
+# WEB_APP_URL = "আপনার_URL"
+# RAPIDAPI_KEY = "আপনার_API_KEY"
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 user_states = {}
@@ -47,12 +54,12 @@ def generate_random_password():
 
 # Temp Mail API সেটআপ (RapidAPI Privatix)
 TM_HOST = "privatix-temp-mail-v1.p.rapidapi.com"
-TM_HEADERS = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": TM_HOST}
 TM_BASE = f"https://{TM_HOST}"
 
 def get_temp_mail():
+    headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": TM_HOST}
     try:
-        domains_res = requests.get(f"{TM_BASE}/request/domains/", headers=TM_HEADERS, timeout=15)
+        domains_res = requests.get(f"{TM_BASE}/request/domains/", headers=headers, timeout=15)
         domains = domains_res.json()
         if not isinstance(domains, list) or not domains: return None, None, None
         random_name = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
@@ -67,9 +74,10 @@ def get_temp_mail():
         return None, None, None
 
 def fetch_email_code(email_md5, is_2fa_code=False):
+    headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": TM_HOST}
     try:
         url = f"{TM_BASE}/request/mail/id/{email_md5}/"
-        res = requests.get(url, headers=TM_HEADERS, timeout=15)
+        res = requests.get(url, headers=headers, timeout=15)
         if res.status_code != 200: return None
         messages = res.json()
         if isinstance(messages, dict) and "error" in messages: return None
@@ -320,6 +328,11 @@ def auto_checker(app):
         time.sleep(60)
 
 def main():
+    # টোকেন না থাকলে এরর দেখাবে
+    if not BOT_TOKEN:
+        print("ERROR: BOT_TOKEN is not set in environment variables!")
+        return
+        
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
