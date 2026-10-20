@@ -7,15 +7,19 @@ import threading
 import time
 import re
 import asyncio
-import hashlib
 import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
+# tmailor লাইব্রেরি ইমপোর্ট (pip install tmailor)
+try:
+    from tmailor import Client
+except ImportError:
+    Client = None
+
 # ================= কনফিগারেশন =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEB_APP_URL = os.getenv("WEB_APP_URL")
-RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 user_states = {}
@@ -25,7 +29,6 @@ def api_call(action, data):
     try:
         payload = {"action": action}
         payload.update(data)
-        # গুগল অ্যাপস স্ক্রিপ্টে রিকোয়েস্ট পাঠানো
         response = requests.post(WEB_APP_URL, json=payload, timeout=15)
         return response.json()
     except Exception as e:
@@ -47,63 +50,53 @@ def get_random_username():
 def generate_random_password():
     return ''.join(random.choices(string.ascii_letters + string.digits, k=8))
 
-# Temp Mail API সেটআপ (RapidAPI Privatix)
-TM_HOST = "privatix-temp-mail-v1.p.rapidapi.com"
-TM_BASE = f"https://{TM_HOST}"
-
-def get_temp_mail():
-    headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": TM_HOST}
+# ================= tmailor ইন্টিগ্রেশন =================
+def get_temp_mail_tmailor():
+    if not Client:
+        logging.error("tmailor library not installed. Run: pip install tmailor")
+        return None, None, None
     try:
-        domains_res = requests.get(f"{TM_BASE}/request/domains/", headers=headers, timeout=15)
-        domains = domains_res.json()
-        if not isinstance(domains, list) or not domains: return None, None, None
-        random_name = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-        if random_name in ["abuse", "webmaster", "contact", "postmaster", "hostmaster", "admin"]:
-            random_name = "user" + random_name
-        domain = random.choice(domains)
-        email = f"{random_name}{domain}"
-        email_md5 = hashlib.md5(email.lower().encode()).hexdigest()
-        return email, email_md5, random_name.capitalize()
+        client = Client()
+        email_obj = client.generate_random_email()
+        # tmailor-এর ক্ষেত্রে token ব্যবহার করে মেসেজ চেক করতে হবে
+        return email_obj.email, email_obj.token, email_obj.email.split('@')[0].capitalize()
     except Exception as e:
-        logging.error(f"TempMail Error: {e}")
+        logging.error(f"tmailor Error: {e}")
         return None, None, None
 
-def fetch_email_code(email_md5, is_2fa_code=False):
-    headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": TM_HOST}
+def fetch_email_code_tmailor(email, token, is_2fa_code=False):
+    if not Client:
+        return None
     try:
-        url = f"{TM_BASE}/request/mail/id/{email_md5}/"
-        res = requests.get(url, headers=headers, timeout=15)
-        if res.status_code != 200: return None
-        messages = res.json()
-        if isinstance(messages, dict) and "error" in messages: return None
-        if not isinstance(messages, list) or len(messages) == 0: return None
+        client = Client()
+        messages = client.get_messages(email)
         
-        for msg in messages:
-            subject = msg.get("mail_subject", "").lower()
+        for msg in messages.messages:
+            subject = msg.subject.lower() if msg.subject else ""
+            body = msg.body_text or ""
+            
             if is_2fa_code:
                 if "authenticate" in subject or "meta" in subject:
-                    combined = (msg.get("mail_html", "") or "") + " " + (msg.get("mail_text", "") or "")
-                    combined = re.sub(r'<[^>]+>', ' ', combined)
-                    combined = re.sub(r'\s+', ' ', combined).strip()
-                    match = re.search(r'\b\d{8}\b', combined)
+                    match = re.search(r'\b\d{8}\b', body)
                     if match: return match.group(0)
             else:
                 if "instagram" in subject or "confirmation" in subject:
-                    combined = (msg.get("mail_html", "") or "") + " " + (msg.get("mail_text", "") or "")
-                    combined = re.sub(r'<[^>]+>', ' ', combined)
-                    combined = re.sub(r'\s+', ' ', combined).strip()
-                    match = re.search(r'\b\d{6}\b', combined)
+                    match = re.search(r'\b\d{6}\b', body)
                     if match: return match.group(0)
-                        
-        for msg in messages:
-            combined = (msg.get("mail_html", "") or "") + " " + (msg.get("mail_text", "") or "")
-            combined = re.sub(r'<[^>]+>', ' ', combined)
-            combined = re.sub(r'\s+', ' ', combined).strip()
-            if is_2fa_code: match = re.search(r'\b\d{8}\b', combined)
-            else: match = re.search(r'\b\d{6}\b', combined)
+                    
+        # Fallback
+        for msg in messages.messages:
+            body = msg.body_text or ""
+            if is_2fa_code:
+                match = re.search(r'\b\d{8}\b', body)
+            else:
+                match = re.search(r'\b\d{6}\b', body)
             if match: return match.group(0)
+            
         return None
-    except: return None
+    except Exception as e:
+        logging.error(f"Fetch Email Error: {e}")
+        return None
 
 def get_main_reply_keyboard():
     keyboard = [
@@ -203,17 +196,38 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=get_main_reply_keyboard()
             )
 
-        elif state.get("state") == "WAIT_2FA_KEY":
+        elif state.get("state") == "WAIT_2FA_KEY_1":
             two_fa_key = text.strip().replace(" ", "").upper()
             try:
                 totp = pyotp.TOTP(two_fa_key)
                 generated_code = totp.now()
                 state["twoFA"] = two_fa_key
+                # 2FA Key একবার নেওয়া হলো, এবার দ্বিতীয়বার চাওয়া হবে
+                state["state"] = "WAIT_2FA_KEY_2"
+                
+                keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel_task")]]
+                base_text = f"✅ **টাস্ক ডিটেইলস**\n\n📧 Email: `{state['email']}`\n🔑 Password: `{state['password']}`\n👤 First Name: `{state['firstName']}`\n🆔 Login: `{state['login']}`\n\n"
+                await update.message.reply_text(base_text + f"✅ আপনার 2FA key থেকে কোড তৈরি হয়েছে: `{generated_code}`\n\n🔑 **নিরাপত্তার জন্য অনুগ্রহ করে আপনার 2FA Key টি আবারও দিন:**", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            except Exception:
+                await update.message.reply_text("❌ 2FA Key টি সঠিক নয়। আবার সঠিক Key দিন।", reply_markup=ReplyKeyboardRemove())
+                
+        elif state.get("state") == "WAIT_2FA_KEY_2":
+            two_fa_key_2 = text.strip().replace(" ", "").upper()
+            
+            # দুইবারের Key মিলছে কিনা চেক
+            if two_fa_key_2 != state["twoFA"]:
+                await update.message.reply_text("❌ দুইবারের 2FA Key মিলছে না। অনুগ্রহ করে আবার প্রথম থেকে Key দিন।", reply_markup=ReplyKeyboardRemove())
+                state["state"] = "WAIT_2FA_KEY_1"
+                return
+                
+            try:
+                totp = pyotp.TOTP(two_fa_key_2)
+                generated_code = totp.now()
                 state["state"] = "COMPLETE_READY"
                 
                 keyboard = [[InlineKeyboardButton("✅ Complete", callback_data="complete_task")], [InlineKeyboardButton("❌ Cancel", callback_data="cancel_task")]]
                 base_text = f"✅ **টাস্ক ডিটেইলস**\n\n📧 Email: `{state['email']}`\n🔑 Password: `{state['password']}`\n👤 First Name: `{state['firstName']}`\n🆔 Login: `{state['login']}`\n\n"
-                await update.message.reply_text(base_text + f"✅ আপনার 2FA key থেকে কোড তৈরি হয়েছে: `{generated_code}`\n\nসব ঠিক থাকলে **Complete** এ ক্লিক করুন।", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+                await update.message.reply_text(base_text + f"✅ দুইবারের Key মিলেছে! কোড: `{generated_code}`\n\nসব ঠিক থাকলে **Complete** এ ক্লিক করুন।", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
             except Exception:
                 await update.message.reply_text("❌ 2FA Key টি সঠিক নয়। আবার সঠিক Key দিন।", reply_markup=ReplyKeyboardRemove())
     else:
@@ -231,13 +245,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("মেইন মেনু:", reply_markup=get_main_reply_keyboard())
 
     elif data == "start_task":
-        email, email_md5, first_name = get_temp_mail()
+        email, token, first_name = get_temp_mail_tmailor()
         if not email:
-            await query.edit_message_text("❌ ইমেইল সার্ভারে সমস্যা হচ্ছে। কিছুক্ষণ পর চেষ্টা করুন।")
+            await query.edit_message_text("❌ tmailor থেকে ইমেইল তৈরি করা যায়নি। লাইব্রেরি ইনস্টল করা আছে কিনা চেক করুন (pip install tmailor)।")
             return
         password = generate_random_password()
         login = get_random_username()
-        user_states[user_id] = {"state": "WAIT_EMAIL_CODE", "email": email, "token": email_md5, "password": password, "firstName": first_name, "login": login, "twoFA": ""}
+        user_states[user_id] = {"state": "WAIT_EMAIL_CODE", "email": email, "token": token, "password": password, "firstName": first_name, "login": login, "twoFA": ""}
         
         text = f"✅ **টাস্ক ডিটেইলস**\n\n📧 Email: `{email}`\n🔑 Password: `{password}`\n👤 First Name: `{first_name}`\n🆔 Login: `{login}`\n\nএই তথ্যগুলো ব্যবহার করে লগইন করুন এবং নিচের **Get Code** এ ক্লিক করুন।"
         keyboard = [[InlineKeyboardButton("📩 Get Code", callback_data="get_email_code")], [InlineKeyboardButton("❌ Cancel", callback_data="cancel_task")]]
@@ -249,7 +263,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("⏳ ইমেইল চেক করা হচ্ছে...")
         code = None
         for _ in range(3):
-            code = fetch_email_code(state["token"], is_2fa_code=False)
+            code = fetch_email_code_tmailor(state["email"], state["token"], is_2fa_code=False)
             if code: break
             await asyncio.sleep(5)
             
@@ -268,7 +282,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("⏳ ৮-ডিজিটের কোড চেক করা হচ্ছে...")
         code = None
         for _ in range(3):
-            code = fetch_email_code(state["token"], is_2fa_code=True)
+            code = fetch_email_code_tmailor(state["email"], state["token"], is_2fa_code=True)
             if code: break
             await asyncio.sleep(5)
             
@@ -284,9 +298,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "enter_2fa":
         state = user_states.get(user_id)
         if not state: return
-        state["state"] = "WAIT_2FA_KEY"
+        state["state"] = "WAIT_2FA_KEY_1"
         keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel_task")]]
-        text = f"✅ **টাস্ক ডিটেইলস**\n\n📧 Email: `{state['email']}`\n🔑 Password: `{state['password']}`\n👤 First Name: `{state['firstName']}`\n🆔 Login: `{state['login']}`\n\n🔑 অনুগ্রহ করে আপনার **2FA Key** দিন:"
+        text = f"✅ **টাস্ক ডিটেইলস**\n\n📧 Email: `{state['email']}`\n🔑 Password: `{state['password']}`\n👤 First Name: `{state['firstName']}`\n🆔 Login: `{state['login']}`\n\n🔑 অনুগ্রহ করে আপনার **2FA Key** দিন (১ম বার):"
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         await query.message.reply_text("অনুগ্রহ করে নিচে 2FA Key টাইপ করুন:", reply_markup=ReplyKeyboardRemove())
 
@@ -304,7 +318,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         
         res = api_call("addTask", payload)
-        print(f"DEBUG RESPONSE: {res}") # এই লাইনটি টার্মিনালে দেখাবে
+        print(f"DEBUG RESPONSE: {res}")
         
         if res.get("status") == "success":
             del user_states[user_id]
